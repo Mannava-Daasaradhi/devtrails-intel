@@ -1,15 +1,18 @@
 # src/03_review_repos.py
 # Phase 3 — Deep Code Review Engine
 #
-# Orchestrates the full pipeline per team:
-#   walk → classify → chunk → per-chunk Ollama calls (with context chaining)
-#   → assembly call → validate → patch retries → manifest update
-#
-# Blueprint refs: Sections 6.1–6.8, 8.2–8.5, 10.1–10.2, 11.2
+# BUG 3 FIX: Missing clone dir was silently marked 'complete'. Separated NOT_FOUND check
+#   from missing clone check. Missing clone is now marked 'failed', not 'complete'.
+# BUG 4 FIX: --validate-only argument was missing from argparse, causing immediate crash.
+# BUG 6 FIX: --rerun-section "Guidewire Integration" failed because code required "## Guidewire
+#   Integration". Now normalizes the input by prepending "## " if not already present.
+# BUG 7 FIX: Resume path skipped already-reviewed teams without updating review_status to
+#   'complete' in the manifest, causing permanent false 'pending' counts.
 #
 # Usage:
-#   python src/03_review_repos.py                           # normal run
+#   python src/03_review_repos.py
 #   python src/03_review_repos.py --rerun-section "Guidewire Integration"
+#   python src/03_review_repos.py --validate-only
 
 import argparse
 import json
@@ -20,7 +23,6 @@ import time
 from datetime import date
 from pathlib import Path
 
-# Add project root to path so utils and config are importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import (
@@ -29,7 +31,7 @@ from config import (
     MAX_CHUNK_CHARS,
     MAX_CHUNKS_PER_TEAM,
     MAX_FILE_CHARS,
-    REVIEW_PARALLEL_WORKERS,  # must always be 1 — do not change
+    REVIEW_PARALLEL_WORKERS,
 )
 from utils.chunker import chunk_files
 from utils.file_walker import generate_file_tree, walk_and_classify
@@ -212,7 +214,6 @@ def build_section_retry_prompt(
     sections_needed: list[str],
     all_summaries: str,
 ) -> str:
-    """Targeted prompt asking the model to fill in only the missing sections."""
     headers = '\n'.join(sections_needed)
     return f"""You are completing a partial technical intelligence report.
 The following sections are MISSING or contain only "NOT FOUND".
@@ -249,17 +250,12 @@ def save_manifest(manifest: list[dict]) -> None:
 
 
 def update_manifest_status(manifest: list[dict], team_name: str, status: str) -> None:
-    """Update review_status in-place and persist immediately."""
     for entry in manifest:
         if entry['team_name'] == team_name:
             entry['review_status'] = status
             break
     save_manifest(manifest)
 
-
-# =========================================================================== #
-# Stub writers                                                                 #
-# =========================================================================== #
 
 def write_empty_review(review_path: Path, team_name: str, repo_url: str, reason: str) -> None:
     review_path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,19 +281,29 @@ def review_team(team_entry: dict, manifest: list[dict]) -> None:
     clone_path = Path('repos') / safe_name
     review_path = REVIEWS_DIR / f"{safe_name}.md"
 
-    # ---- Step 1: Resumability — single source of truth is the manifest ------
-    if team_entry.get('review_status') == 'complete' or (
-        review_path.exists() and not is_marked_failed(review_path)
-    ):
+    # ---- Step 1: Resumability -----------------------------------------------
+    # BUG 7 FIX: original skipped without healing manifest status to 'complete',
+    # leaving teams permanently stuck as 'pending' after a resumed run.
+    if review_path.exists() and not is_marked_failed(review_path):
+        if team_entry.get('review_status') != 'complete':
+            update_manifest_status(manifest, team_name, 'complete')  # heal the manifest
         logger.info("[SKIP] %s — already reviewed", team_name)
         return
 
     REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ---- Step 2: Handle NOT_FOUND / missing clone ---------------------------
-    if team_entry.get('confidence') == 'NOT_FOUND' or not clone_path.exists():
+    # ---- Step 2: Handle NOT_FOUND and missing clone -------------------------
+    # BUG 3 FIX: original combined these two checks, marking missing clones as
+    # 'complete'. Separated so clone failures are correctly marked 'failed'.
+    if team_entry.get('confidence') == 'NOT_FOUND':
         write_empty_review(review_path, team_name, repo_url, "REPO NOT FOUND")
         update_manifest_status(manifest, team_name, 'complete')
+        return
+
+    if not clone_path.exists():
+        write_empty_review(review_path, team_name, repo_url, "CLONE MISSING — re-run Phase 2")
+        mark_failed(review_path, "clone path missing for non-NOT_FOUND repo")
+        update_manifest_status(manifest, team_name, 'failed')
         return
 
     # ---- Step 3: Walk and classify ------------------------------------------
@@ -375,14 +381,11 @@ def review_team(team_entry: dict, manifest: list[dict]) -> None:
             retry_output = ollama_generate_with_retry(retry_prompt, CODE_REVIEW_MODEL)
 
             if retry_output:
-                # Parse retry output and patch each section individually
                 for section in gaps:
                     section_body = extract_section(retry_output, section)
                     if section_body:
                         patch_review(review_path, section, section_body)
                     else:
-                        # Model may have used the header — try to find raw text block
-                        # by locating the header in the retry output and grabbing what follows
                         header_plain = section.lstrip('#').strip()
                         if header_plain in retry_output:
                             idx = retry_output.index(header_plain) + len(header_plain)
@@ -398,7 +401,6 @@ def review_team(team_entry: dict, manifest: list[dict]) -> None:
             update_manifest_status(manifest, team_name, 'failed')
             return
 
-    # ---- Step 8: Optional disk cleanup (config.DELETE_REPOS_AFTER_REVIEW) ---
     if DELETE_REPOS_AFTER_REVIEW and clone_path.exists():
         shutil.rmtree(clone_path)
         logger.info("[%s] Deleted clone to free disk space", team_name)
@@ -408,23 +410,25 @@ def review_team(team_entry: dict, manifest: list[dict]) -> None:
 
 
 # =========================================================================== #
-# Re-run mode — patch one section across all existing reviews                 #
+# Re-run mode                                                                  #
 # =========================================================================== #
 
 def rerun_section(section_header: str) -> None:
     """
-    Re-run a single named section against all 265 existing .md files.
-    Useful when you discover after a full overnight run that a section was
-    consistently missed or populated with NOT FOUND (Section 10.2).
-
-    Usage:
-        python src/03_review_repos.py --rerun-section "Guidewire Integration"
+    BUG 6 FIX: The documented CLI example used "Guidewire Integration" but the code
+    required "## Guidewire Integration" (with ##). The mismatch caused an immediate
+    "Unknown section" exit every time. Now normalizes input to accept both forms.
     """
-    if section_header not in REQUIRED_SECTIONS:
+    # Normalize: accept "Guidewire Integration" or "## Guidewire Integration"
+    normalized = section_header if section_header.startswith("## ") else f"## {section_header}"
+
+    if normalized not in REQUIRED_SECTIONS:
         print(f"Unknown section '{section_header}'. Valid sections:")
         for s in REQUIRED_SECTIONS:
-            print(f"  {s}")
+            print(f"  {s.lstrip('# ')}")  # show without ## for readability
         sys.exit(1)
+
+    section_header = normalized  # use the ## form from here on
 
     manifest = load_manifest()
     md_files = list(REVIEWS_DIR.glob('*.md'))
@@ -432,7 +436,6 @@ def rerun_section(section_header: str) -> None:
 
     for i, review_path in enumerate(md_files, 1):
         safe_name = review_path.stem
-        # Find matching manifest entry for repo_url / team_name
         entry = next((e for e in manifest if e['safe_name'] == safe_name), None)
         if not entry:
             logger.warning("No manifest entry for %s — skipping", safe_name)
@@ -442,7 +445,6 @@ def rerun_section(section_header: str) -> None:
         repo_url  = entry.get('repo_url', 'UNKNOWN')
         content   = review_path.read_text(encoding='utf-8', errors='replace')
 
-        # Check whether this section actually needs refreshing
         body = extract_section(content, section_header)
         if body and not body.strip().upper().startswith('NOT FOUND'):
             logger.info("[%d/%d] %s — section already populated, skipping", i, len(md_files), team_name)
@@ -450,8 +452,6 @@ def rerun_section(section_header: str) -> None:
 
         print(f"[{i}/{len(md_files)}] {team_name} — refreshing '{section_header}'")
 
-        # We no longer have the chunk summaries, so reconstruct from the .md itself
-        # by using the existing sections as context for the model
         existing_context = '\n\n'.join(
             f"{s}\n{extract_section(content, s)}"
             for s in REQUIRED_SECTIONS
@@ -476,7 +476,6 @@ def rerun_section(section_header: str) -> None:
 # =========================================================================== #
 
 def main() -> None:
-    # ---- Health check -------------------------------------------------------
     if not check_ollama_available(CODE_REVIEW_MODEL):
         print(f"ERROR: Ollama is not running or model '{CODE_REVIEW_MODEL}' is not pulled.")
         print(f"  Run: ollama pull {CODE_REVIEW_MODEL}")
@@ -484,7 +483,6 @@ def main() -> None:
 
     manifest = load_manifest()
 
-    # Process in priority order: HIGH → LOW → NOT_FOUND (Section 6.8)
     ordered = (
         [t for t in manifest if t.get('confidence') == 'HIGH'] +
         [t for t in manifest if t.get('confidence') == 'LOW'] +
@@ -506,7 +504,9 @@ def main() -> None:
 
         try:
             review_team(team_entry, manifest)
-            status = team_entry.get('review_status', '')
+            # Re-read status from manifest (review_team updates it in-place)
+            updated = next((t for t in manifest if t['team_name'] == team_name), {})
+            status = updated.get('review_status', '')
             if status == 'complete':
                 completed += 1
             elif status == 'failed':
@@ -520,7 +520,6 @@ def main() -> None:
             failed += 1
             continue
 
-        # Progress ticker every 10 teams
         if i % 10 == 0:
             elapsed = time.time() - start
             rate    = elapsed / i
@@ -529,7 +528,6 @@ def main() -> None:
                   f"done={completed} failed={failed} | "
                   f"ETA ~{eta_s/3600:.1f}h ──\n")
 
-    # ---- Unload model from VRAM before Phase 4 starts (Section 9) -----------
     print(f"\nUnloading {CODE_REVIEW_MODEL} from VRAM before Phase 4...")
     unload_model(CODE_REVIEW_MODEL)
 
@@ -547,15 +545,29 @@ def main() -> None:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Phase 3 — Deep Code Review Engine')
+
     parser.add_argument(
         '--rerun-section',
         metavar='SECTION',
         help='Re-run a single section across all existing reviews. '
-             'Example: --rerun-section "Guidewire Integration"',
+             'E.g.: --rerun-section "Guidewire Integration"',
     )
+    # BUG 4 FIX: --validate-only was passed by run_all.py but never defined here,
+    # causing argparse to exit with an error before anything ran.
+    parser.add_argument(
+        '--validate-only',
+        action='store_true',
+        help='Validate all existing review files and exit with 0 (pass) or 1 (fail)',
+    )
+
     args = parser.parse_args()
 
-    if args.rerun_section:
+    if args.validate_only:
+        from utils.validator import validate_all
+        summary = validate_all(REVIEWS_DIR)
+        print(f"Passed: {summary['passed']} / Failed: {summary['failed']} / Rate: {summary['pass_rate']:.1%}")
+        sys.exit(0 if summary['pass_rate'] >= 0.90 else 1)
+    elif args.rerun_section:
         rerun_section(args.rerun_section)
     else:
         main()

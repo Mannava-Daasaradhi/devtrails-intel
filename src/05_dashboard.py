@@ -1,11 +1,15 @@
 """
 src/05_dashboard.py — Pipeline Progress Dashboard
-Run at any point to check the status of the full pipeline without reading JSON manually.
+
+BUG 5 FIX: Gate 2→3 always showed 0 repos cloned because the dashboard checked for
+clone_status == "complete", but Phase 2 (02_clone_repos.py) writes "success", "empty",
+or "sparse" — never "complete". Added CLONE_COMPLETE_STATUSES set mapping Phase 2's
+actual status values to the "cloned successfully" concept.
 
 Usage:
     python src/05_dashboard.py
-    python src/05_dashboard.py --verbose      # also lists LOW/NOT_FOUND team names
-    python src/05_dashboard.py --failed-only  # print only failed/pending teams
+    python src/05_dashboard.py --verbose
+    python src/05_dashboard.py --failed-only
 """
 
 import argparse
@@ -18,13 +22,17 @@ MANIFEST_PATH = Path("repos_manifest.json")
 REVIEWS_DIR = Path("reviews")
 KNOWLEDGE_DIR = Path("knowledge")
 
-RESET = "\033[0m"
-BOLD = "\033[1m"
-GREEN = "\033[32m"
+# BUG 5 FIX: Phase 2 writes these three statuses — NOT "complete".
+# The dashboard must check for all three when computing the cloned count.
+CLONE_COMPLETE_STATUSES = {"success", "empty", "sparse"}
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+GREEN  = "\033[32m"
 YELLOW = "\033[33m"
-RED = "\033[31m"
-CYAN = "\033[36m"
-DIM = "\033[2m"
+RED    = "\033[31m"
+CYAN   = "\033[36m"
+DIM    = "\033[2m"
 
 
 def color(text: str, code: str, use_color: bool = True) -> str:
@@ -63,14 +71,19 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
     confidences = Counter(t.get("confidence", "unknown") for t in manifest)
     knowledge_files = check_knowledge_files()
 
-    # Count review .md files actually on disk
     reviews_on_disk = len(list(REVIEWS_DIR.glob("*.md"))) if REVIEWS_DIR.exists() else 0
+
+    # BUG 5 FIX: Count all Phase 2 success statuses, not just "complete"
+    cloned_count = sum(
+        1 for t in manifest
+        if t.get("clone_status") in CLONE_COMPLETE_STATUSES
+    )
 
     sep = "─" * 54
 
     if not failed_only:
         print(color(sep, BOLD, use_color))
-        print(color(f"  DEVTrails Intel — Pipeline Dashboard", BOLD + CYAN, use_color))
+        print(color("  DEVTrails Intel — Pipeline Dashboard", BOLD + CYAN, use_color))
         print(color(f"  Total teams in manifest: {total}", BOLD, use_color))
         print(color(sep, BOLD, use_color))
 
@@ -81,9 +94,8 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
             if count == 0:
                 continue
             label_color = GREEN if status == "HIGH" else (YELLOW if status == "LOW" else RED)
-            label = f"  {status:<12}"
             print(
-                color(label, label_color, use_color)
+                color(f"  {status:<12}", label_color, use_color)
                 + f" {bar(count, total)}  {count:>4} / {total}  ({pct(count, total)})"
             )
             if verbose and status in ("LOW", "NOT_FOUND"):
@@ -94,16 +106,21 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
 
         # ── Clone Status ─────────────────────────────────────────────
         print(color("\n  CLONE STATUS", BOLD, use_color))
-        for status in ["complete", "pending", "failed", "skipped", "unknown"]:
+        # Show Phase 2 actual statuses
+        for status in ["success", "empty", "sparse", "failed", "unknown"]:
             count = clone_statuses.get(status, 0)
             if count == 0:
                 continue
-            label_color = GREEN if status == "complete" else (RED if status == "failed" else YELLOW)
-            label = f"  {status:<12}"
+            label_color = GREEN if status in CLONE_COMPLETE_STATUSES else (RED if status == "failed" else YELLOW)
             print(
-                color(label, label_color, use_color)
+                color(f"  {status:<12}", label_color, use_color)
                 + f" {bar(count, total)}  {count:>4} / {total}  ({pct(count, total)})"
             )
+        print(
+            color(f"  {'TOTAL CLONED':<12}", GREEN, use_color)
+            + f" {bar(cloned_count, total)}  {cloned_count:>4} / {total}  ({pct(cloned_count, total)})"
+            + color("  (success+empty+sparse)", DIM, use_color)
+        )
 
         # ── Review Status ─────────────────────────────────────────────
         complete_count = review_statuses.get("complete", 0)
@@ -113,13 +130,11 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
             if count == 0:
                 continue
             label_color = GREEN if status == "complete" else (RED if status == "failed" else YELLOW)
-            label = f"  {status:<12}"
             print(
-                color(label, label_color, use_color)
+                color(f"  {status:<12}", label_color, use_color)
                 + f" {bar(count, total)}  {count:>4} / {total}  ({pct(count, total)})"
             )
 
-        # Review files actually on disk vs manifest count
         manifest_complete = review_statuses.get("complete", 0)
         disk_match = "✓" if reviews_on_disk == manifest_complete else "⚠"
         disk_color = GREEN if reviews_on_disk == manifest_complete else YELLOW
@@ -135,22 +150,19 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
             icon = color("✓", GREEN, use_color) if exists else color("✗", RED, use_color)
             print(f"    {icon}  {fname}")
 
-        # ── Quality Gate Summary ──────────────────────────────────────
+        # ── Quality Gates ─────────────────────────────────────────────
         print(color("\n  QUALITY GATES", BOLD, use_color))
 
         def gate(label: str, passed: bool, detail: str = ""):
             mark = color("PASS", GREEN, use_color) if passed else color("FAIL", RED, use_color)
             print(f"    [{mark}]  {label}" + (f"  {color(detail, DIM, use_color)}" if detail else ""))
 
-        # Gate 1→2
         found_pct = (confidences.get("HIGH", 0) + confidences.get("LOW", 0)) / max(total, 1)
         gate("≥87% teams discovered (Gate 1→2)", found_pct >= 0.87, f"{found_pct:.0%} found")
 
-        # Gate 2→3
-        cloned = clone_statuses.get("complete", 0)
-        gate("≥220 repos cloned (Gate 2→3)", cloned >= 220, f"{cloned} cloned")
+        # BUG 5 FIX: use cloned_count (sum of success+empty+sparse), not clone_statuses["complete"]
+        gate("≥220 repos cloned (Gate 2→3)", cloned_count >= 220, f"{cloned_count} cloned")
 
-        # Gate 3→4
         review_pass_rate = complete_count / max(total, 1)
         gate(
             "≥90% reviews valid (Gate 3→4)",
@@ -158,7 +170,6 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
             f"{review_pass_rate:.0%} complete",
         )
 
-        # Gate 4→done
         all_knowledge = all(knowledge_files.values())
         gate("All knowledge files present (Gate 4→done)", all_knowledge)
 
@@ -191,24 +202,13 @@ def print_dashboard(manifest: list[dict], verbose: bool, failed_only: bool, use_
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="DEVTrails Intel — Pipeline Progress Dashboard"
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Also list LOW_CONFIDENCE, NOT_FOUND, and pending team names",
-    )
-    parser.add_argument(
-        "--failed-only",
-        action="store_true",
-        help="Print only failed/pending teams and exit",
-    )
-    parser.add_argument(
-        "--no-color",
-        action="store_true",
-        help="Disable ANSI colour output (useful for piping to a file)",
-    )
+    parser = argparse.ArgumentParser(description="DEVTrails Intel — Pipeline Progress Dashboard")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Also list LOW_CONFIDENCE, NOT_FOUND, and pending team names")
+    parser.add_argument("--failed-only", action="store_true",
+                        help="Print only failed/pending teams and exit")
+    parser.add_argument("--no-color", action="store_true",
+                        help="Disable ANSI colour output")
     args = parser.parse_args()
 
     use_color = not args.no_color and sys.stdout.isatty()

@@ -1,8 +1,12 @@
 """
 src/04_synthesize.py — Phase 4: Knowledge Synthesis
-Reads all reviews/*.md files, computes real frequency counts in Python,
-then calls Ollama (mistral:7b) to write MASTER_PATTERNS.md and GAPS.md.
-YOUR_FEATURE_PLAN.md is scaffolded with instructions for the manual Gemini step.
+
+BUG 2 FIX: load_all_reviews() now skips files marked <!-- VALIDATION_FAILED -->.
+  Previously these were included, corrupting tech frequency counts and MASTER_PATTERNS.md.
+
+BUG 8 FIX: build_tech_freq() used `if tech.lower() in text` — a plain substring match.
+  "Go" matched inside "MongoDB", "Django" matched anywhere containing those letters, etc.
+  Fixed with word-boundary-aware regex so "Go" only matches as a standalone token.
 
 Run: python src/04_synthesize.py
 """
@@ -15,9 +19,6 @@ import requests
 from pathlib import Path
 from collections import Counter
 
-# ---------------------------------------------------------------------------
-# Config — import from config.py if available, otherwise use defaults
-# ---------------------------------------------------------------------------
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from config import (
@@ -34,10 +35,6 @@ REVIEWS_DIR = Path("reviews")
 KNOWLEDGE_DIR = Path("knowledge")
 KNOWLEDGE_DIR.mkdir(exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# Known technology lookup list — seeds the frequency counter.
-# Add more as needed; the regex fallback handles everything else.
-# ---------------------------------------------------------------------------
 KNOWN_TECHNOLOGIES = [
     # Frontend
     "React", "Vue", "Angular", "Next.js", "Nuxt", "Svelte", "TypeScript",
@@ -69,20 +66,28 @@ GUIDEWIRE_KEYWORDS = [
     "AppExchange", "Predictive Analytics", "Cyence",
 ]
 
+# Pre-compile word-boundary patterns for each known technology (BUG 8 FIX).
+# These are compiled once at import time for performance across 265 reviews.
+_TECH_PATTERNS: dict[str, re.Pattern] = {
+    tech: re.compile(
+        rf'(?<![a-z0-9_\-]){re.escape(tech.lower())}(?![a-z0-9_\-])',
+        re.IGNORECASE,
+    )
+    for tech in KNOWN_TECHNOLOGIES
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def extract_section(md_content: str, section_header: str) -> str:
-    """Extract content between section_header and the next ## header."""
     pattern = rf'{re.escape(section_header)}\n(.*?)(?=\n## |\Z)'
     match = re.search(pattern, md_content, re.DOTALL)
     return match.group(1).strip() if match else ''
 
 
 def extract_bullet_items(text: str) -> list[str]:
-    """Return non-empty lines that look like bullet items."""
     items = []
     for line in text.splitlines():
         line = line.strip().lstrip('-*•').strip()
@@ -92,7 +97,6 @@ def extract_bullet_items(text: str) -> list[str]:
 
 
 def unload_model(model_name: str):
-    """Force Ollama to release a model from VRAM (keep_alive=0)."""
     try:
         requests.post(
             f"{OLLAMA_BASE_URL}/api/generate",
@@ -154,24 +158,31 @@ def ollama_generate_with_retry(
 # ---------------------------------------------------------------------------
 
 def load_all_reviews() -> list[dict]:
-    """Return a list of dicts, one per review file."""
+    """
+    BUG 2 FIX: Previously included VALIDATION_FAILED files in frequency analysis,
+    corrupting MASTER_PATTERNS.md and GAPS.md with bad data.
+    Now skips any file starting with the VALIDATION_FAILED marker.
+    """
     records = []
+    skipped = 0
     for md_file in sorted(REVIEWS_DIR.glob("*.md")):
         try:
             content = md_file.read_text(encoding="utf-8")
-            records.append(
-                {
-                    "file": md_file.name,
-                    "tech_stack": extract_section(content, "## Tech Stack"),
-                    "features": extract_section(content, "## Core Features Implemented"),
-                    "notable": extract_section(content, "## Notable Technical Choices"),
-                    "guidewire": extract_section(content, "## Guidewire Integration"),
-                    "api_surface": extract_section(content, "## API Surface"),
-                }
-            )
+            # BUG 2 FIX: Skip files marked as failed — they contain no real data.
+            if content.startswith("<!-- VALIDATION_FAILED -->"):
+                skipped += 1
+                continue
+            records.append({
+                "file": md_file.name,
+                "tech_stack": extract_section(content, "## Tech Stack"),
+                "features": extract_section(content, "## Core Features Implemented"),
+                "notable": extract_section(content, "## Notable Technical Choices"),
+                "guidewire": extract_section(content, "## Guidewire Integration"),
+                "api_surface": extract_section(content, "## API Surface"),
+            })
         except Exception as e:
             print(f"  [WARN] Could not read {md_file.name}: {e}")
-    print(f"[PARSE] Loaded {len(records)} review files from {REVIEWS_DIR}/")
+    print(f"[PARSE] Loaded {len(records)} review files ({skipped} VALIDATION_FAILED skipped) from {REVIEWS_DIR}/")
     return records
 
 
@@ -180,34 +191,35 @@ def load_all_reviews() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def build_tech_freq(records: list[dict]) -> Counter:
-    """Count exact technology mentions across all tech stack sections."""
+    """
+    BUG 8 FIX: Original used `if tech.lower() in text` — plain substring match.
+    "Go" matched inside "MongoDB", "Django" matched inside "Django REST Framework", etc.
+    Now uses pre-compiled word-boundary regex patterns so "Go" only matches as a
+    standalone token, not as part of another word.
+    """
     freq: Counter = Counter()
     for record in records:
-        text = record["tech_stack"].lower()
-        for tech in KNOWN_TECHNOLOGIES:
-            if tech.lower() in text:
+        text = record["tech_stack"]
+        for tech, pattern in _TECH_PATTERNS.items():
+            if pattern.search(text):
                 freq[tech] += 1
         # Also pick up any bullet items not in the known list
         for item in extract_bullet_items(record["tech_stack"]):
-            # Short items that look like proper-noun tech names
             if 2 < len(item) < 40 and item not in KNOWN_TECHNOLOGIES:
                 freq[item] += 1
     return freq
 
 
 def build_feature_freq(records: list[dict]) -> Counter:
-    """Rough frequency of feature keywords across all feature sections."""
     freq: Counter = Counter()
     for record in records:
         for item in extract_bullet_items(record["features"]):
-            # Normalise to lower-case first 60 chars to collapse near-duplicates
             key = item.lower()[:60]
             freq[key] += 1
     return freq
 
 
 def build_guidewire_freq(records: list[dict]) -> Counter:
-    """Count Guidewire product/API keyword mentions."""
     freq: Counter = Counter()
     for record in records:
         section_text = record["guidewire"] + " " + record["api_surface"]
@@ -220,13 +232,6 @@ def build_guidewire_freq(records: list[dict]) -> Counter:
 
 
 def build_rare_items(records: list[dict], total: int, threshold_pct: float = 0.15) -> dict:
-    """
-    Extract low-frequency items from three sections:
-      - Notable Technical Choices
-      - Guidewire Integration
-      - API Surface
-    threshold_pct: items appearing in fewer than this fraction of teams are 'rare'.
-    """
     max_count = max(1, int(total * threshold_pct))
 
     notable_freq: Counter = Counter()
@@ -241,14 +246,10 @@ def build_rare_items(records: list[dict], total: int, threshold_pct: float = 0.1
         for item in extract_bullet_items(record["api_surface"]):
             api_freq[item.lower()[:80]] += 1
 
-    rare_notable = {k: v for k, v in notable_freq.items() if v <= max_count}
-    rare_guidewire = {k: v for k, v in gw_item_freq.items() if v <= max_count}
-    rare_api = {k: v for k, v in api_freq.items() if v <= max_count}
-
     return {
-        "rare_notable": rare_notable,
-        "rare_guidewire": rare_guidewire,
-        "rare_api": rare_api,
+        "rare_notable": {k: v for k, v in notable_freq.items() if v <= max_count},
+        "rare_guidewire": {k: v for k, v in gw_item_freq.items() if v <= max_count},
+        "rare_api": {k: v for k, v in api_freq.items() if v <= max_count},
     }
 
 
@@ -286,11 +287,9 @@ These are baseline expectations — do NOT differentiate on them. List each with
 
 ## Common Choices
 Technologies or patterns used by 30–60% of teams ({int(total * 0.3)}–{int(total * 0.6)} teams).
-Worth knowing but not strongly differentiating.
 
 ## Minority Choices
 Technologies used by 10–30% of teams ({int(total * 0.1)}–{int(total * 0.3)} teams).
-Implementing these shows breadth without being novel.
 
 ## Guidewire API Coverage
 Which Guidewire APIs appear most and least often across all teams.
@@ -338,39 +337,34 @@ def generate_gaps(rare_items: dict, total: int) -> bool:
     prompt = f"""You are writing a competitive gap analysis for a hackathon competitor.
 Total teams analysed: {total}
 The items below appear in fewer than 15% of teams — they are rare implementation choices.
-Rare = potential differentiation opportunity.
 
-LOW-FREQUENCY NOTABLE TECHNICAL CHOICES (from ## Notable Technical Choices sections):
+LOW-FREQUENCY NOTABLE TECHNICAL CHOICES:
 {rare_notable_str}
 
-LOW-FREQUENCY GUIDEWIRE APIS (from ## Guidewire Integration and ## API Surface sections):
+LOW-FREQUENCY GUIDEWIRE APIS:
 {rare_guidewire_str}
 
-LOW-FREQUENCY API PATTERNS (from ## API Surface sections):
+LOW-FREQUENCY API PATTERNS:
 {rare_api_str}
 
 Write GAPS.md with EXACTLY these sections (use markdown ## headers):
 
 ## Rare Technical Choices Analysis
 For each rare item from Notable Technical Choices, write one bullet:
-  - **Item name**: Plain-English explanation | Complexity: Low/Medium/High | Judge impact: Low/Medium/High | Why rare?
+  - **Item name**: explanation | Complexity: Low/Medium/High | Judge impact: Low/Medium/High | Why rare?
 
 ## Rare Guidewire Integration Opportunities
-For each rare Guidewire API/product, write one bullet in the same format as above.
-This is the HIGHEST-VALUE section — rare Guidewire API usage is the top differentiator
-in a Guidewire hackathon.
+Same format. This is the HIGHEST-VALUE section — rare Guidewire API usage is the top differentiator.
 
 ## Rare API Patterns
-For each rare API pattern, write one bullet in the same format.
+Same format.
 
 ## Top 10 Differentiation Opportunities
 Ranked list of the 10 best items to build, ranked by:
-  (high judge impact × low or medium implementation complexity)
-For each: brief name, why it differentiates, realistic complexity estimate.
+  (high judge impact × low/medium implementation complexity)
 
 ## Key Insight Summary
-2–3 paragraphs synthesising the most important patterns in this gap analysis.
-What story does the data tell about where the competition is weak?
+2–3 paragraphs synthesising the most important patterns. What story does the data tell?
 """
 
     result = ollama_generate_with_retry(prompt, SYNTHESIS_MODEL, num_predict=4096)
@@ -384,7 +378,7 @@ What story does the data tell about where the competition is weak?
 
 
 # ---------------------------------------------------------------------------
-# Step 5 — Scaffold YOUR_FEATURE_PLAN.md (manual Gemini step)
+# Step 5 — Scaffold YOUR_FEATURE_PLAN.md
 # ---------------------------------------------------------------------------
 
 def scaffold_feature_plan():
@@ -397,22 +391,16 @@ def scaffold_feature_plan():
         gaps_content = gaps_path.read_text(encoding="utf-8")
 
     template = f"""# YOUR_FEATURE_PLAN.md
+
 ## How to complete this file
 
-This file requires a **manual Gemini step** (see Section 7.4 of the blueprint).
-GAPS.md has been generated automatically. Your task:
-
 1. Write a ~500-word description of your current repo state below.
-2. Copy the prompt below (with GAPS.md filled in) into Gemini Pro or Flash.
+2. Copy the Gemini prompt below into Gemini Pro.
 3. Paste Gemini's response here and delete this instruction block.
 
 ---
 
 ## Your Current Repo Description (fill this in manually)
-
-<!-- Describe what you have built so far. ~500 words.
-     Cover: tech stack, features implemented, what's working, what's stubbed.
-     Be specific — Gemini will use this to tailor its recommendations. -->
 
 YOUR_REPO_DESCRIPTION_HERE
 
@@ -437,8 +425,8 @@ make my submission clearly stand out from competitors.
 For each feature:
 - Feature name and description
 - Why it's rare/innovative given the competition landscape
-- Estimated implementation time (be realistic for a solo developer)
-- Specific technical approach (not generic — give actual implementation guidance)
+- Estimated implementation time
+- Specific technical approach
 - Which part of my existing implementation it extends
 
 Rank by: (uniqueness in competition) × (feasibility in 24h) / (implementation complexity)
@@ -446,9 +434,8 @@ Rank by: (uniqueness in competition) × (feasibility in 24h) / (implementation c
 
 ---
 
-## Gemini's Response (paste here after running the prompt above)
+## Gemini's Response (paste here)
 
-<!-- Paste Gemini's output here -->
 """
 
     output_path.write_text(template, encoding="utf-8")
@@ -464,12 +451,10 @@ def main():
     print("Phase 4 — Knowledge Synthesis")
     print("=" * 60)
 
-    # Step 0: Unload Phase 3 model from VRAM before loading synthesis model
     print(f"\n[VRAM] Unloading {CODE_REVIEW_MODEL} to free VRAM for synthesis model...")
     unload_model(CODE_REVIEW_MODEL)
     time.sleep(2)
 
-    # Step 1: Parse all review files
     if not REVIEWS_DIR.exists():
         print(f"[ERROR] {REVIEWS_DIR}/ does not exist. Run Phase 3 first.")
         sys.exit(1)
@@ -477,26 +462,23 @@ def main():
     records = load_all_reviews()
     total = len(records)
     if total == 0:
-        print("[ERROR] No review files found. Run Phase 3 first.")
+        print("[ERROR] No review files found (or all are VALIDATION_FAILED). Run Phase 3 first.")
         sys.exit(1)
 
-    # Step 2: Code-driven frequency analysis
     print(f"\n[FREQ] Computing frequency counts across {total} review files...")
     tech_freq = build_tech_freq(records)
     feature_freq = build_feature_freq(records)
     guidewire_freq = build_guidewire_freq(records)
     rare_items = build_rare_items(records, total)
 
-    # Print quick summary
     print(f"  Top 10 technologies: {dict(tech_freq.most_common(10))}")
     print(f"  Guidewire keyword hits: {dict(guidewire_freq.most_common())}")
     print(
-        f"  Rare items found — notable: {len(rare_items['rare_notable'])}, "
+        f"  Rare items — notable: {len(rare_items['rare_notable'])}, "
         f"guidewire: {len(rare_items['rare_guidewire'])}, "
         f"api: {len(rare_items['rare_api'])}"
     )
 
-    # Persist raw frequency data for debugging / re-runs
     freq_cache_path = KNOWLEDGE_DIR / "freq_cache.json"
     freq_cache = {
         "total_teams": total,
@@ -510,23 +492,17 @@ def main():
     freq_cache_path.write_text(json.dumps(freq_cache, indent=2), encoding="utf-8")
     print(f"\n[CACHE] Frequency data saved to {freq_cache_path}")
 
-    # Step 3: Generate MASTER_PATTERNS.md
     master_ok = generate_master_patterns(tech_freq, feature_freq, guidewire_freq, total)
-
-    # Step 4: Generate GAPS.md
     gaps_ok = generate_gaps(rare_items, total)
-
-    # Step 5: Scaffold YOUR_FEATURE_PLAN.md
     scaffold_feature_plan()
 
-    # Summary
     print("\n" + "=" * 60)
     print("Phase 4 Complete")
     print("=" * 60)
-    print(f"  knowledge/MASTER_PATTERNS.md : {'✓' if master_ok else '✗ FAILED'}")
-    print(f"  knowledge/GAPS.md            : {'✓' if gaps_ok else '✗ FAILED'}")
+    print(f"  knowledge/MASTER_PATTERNS.md  : {'✓' if master_ok else '✗ FAILED'}")
+    print(f"  knowledge/GAPS.md             : {'✓' if gaps_ok else '✗ FAILED'}")
     print(f"  knowledge/YOUR_FEATURE_PLAN.md: ✓ (needs manual Gemini step)")
-    print(f"  knowledge/freq_cache.json    : ✓ (raw frequency data)")
+    print(f"  knowledge/freq_cache.json     : ✓")
     print()
 
     if not master_ok or not gaps_ok:

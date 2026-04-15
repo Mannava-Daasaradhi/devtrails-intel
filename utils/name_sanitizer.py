@@ -75,17 +75,19 @@ def build_name_map(
         )
     names = [n for n in raw_names if n.strip()]
 
-    # Check for duplicates early — report but don't abort (let caller decide).
+    # Fail fast on duplicate raw team names.
+    # The mapping dict is keyed by original name — two identical names cannot
+    # produce two distinct entries, so silently "resolving" them is impossible.
+    # The quality gate in Section 13 requires 265 unique names anyway.
     seen: dict[str, int] = {}
     for n in names:
         seen[n] = seen.get(n, 0) + 1
     dupes = {n: c for n, c in seen.items() if c > 1}
     if dupes:
-        print(
-            f"WARNING: {len(dupes)} duplicate team name(s) found in {teams_file}:\n"
+        raise ValueError(
+            f"{len(dupes)} duplicate team name(s) found in {teams_file}:\n"
             + "\n".join(f"  '{n}' appears {c}x" for n, c in dupes.items())
-            + "\nDuplicates will each get their own safe name via the collision counter.",
-            file=sys.stderr,
+            + "\nFix teams.txt — remove duplicates — then re-run."
         )
 
     mapping: dict[str, str] = {}           # original → safe

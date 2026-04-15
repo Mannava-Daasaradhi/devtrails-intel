@@ -1,13 +1,15 @@
 # utils/chunker.py
 # Groups classified files into prompt-sized chunks for Ollama review.
 # Follows the blueprint's grouping order (Section 6.3) and per-team chunk cap (Section 6.2).
+#
+# BUG 1 FIX: walk_and_classify() returns dict[str, list[tuple[str, str]]] (label, content pairs),
+# but the original chunk_files() treated each item as a Path and called .read_text() on it.
+# Fixed by checking isinstance(file_item, tuple) and handling both tuple and Path inputs.
 
 import logging
 from pathlib import Path
 from typing import Iterator
 
-# Grouping order matters — builds context progressively for the model.
-# config and readme first so later chunks have architectural grounding.
 CATEGORY_ORDER = [
     'config',
     'readme',
@@ -18,7 +20,7 @@ CATEGORY_ORDER = [
     'frontend',
     'infra',
     'tests',
-    'uncategorised',   # catch-all from file_walker flat-repo fallback
+    'uncategorised',
 ]
 
 FILE_SEPARATOR = "=== FILE: {filepath} ===\n{content}\n"
@@ -27,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 def _read_file_safe(filepath: Path) -> str:
-    """Read a file, returning empty string on any decode error."""
     try:
         return filepath.read_text(encoding='utf-8', errors='replace')
     except Exception as exc:
@@ -36,101 +37,64 @@ def _read_file_safe(filepath: Path) -> str:
 
 
 def _split_into_chunks(text: str, max_chars: int, label: str) -> list[tuple[str, str]]:
-    """
-    Split a single large text block into parts that each fit inside max_chars.
-    Returns a list of (label_with_part_suffix, chunk_text).
-    """
     if len(text) <= max_chars:
         return [(label, text)]
-
     parts = []
     raw_chunks = [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
     total = len(raw_chunks)
     for idx, piece in enumerate(raw_chunks, start=1):
-        part_label = f"{label} [part {idx}/{total}]"
-        parts.append((part_label, piece))
+        parts.append((f"{label} [part {idx}/{total}]", piece))
     return parts
 
 
 def chunk_files(
-    classified_files: dict[str, list[Path]],
+    classified_files: dict[str, list],
     max_chunk_chars: int = 60_000,
     max_file_chars: int = 80_000,
     max_chunks_per_team: int = 20,
 ) -> list[dict]:
-    """
-    Build a list of chunk dicts ready for the per-chunk Ollama prompt.
-
-    Parameters
-    ----------
-    classified_files : dict mapping category name → list of Path objects
-        Output of file_walker.walk_and_classify().
-    max_chunk_chars : int
-        Maximum total code characters per Ollama call (default 60 000).
-        Leaves room for the prompt template around the code block.
-    max_file_chars : int
-        Files larger than this are split into parts before grouping (default 80 000).
-    max_chunks_per_team : int
-        Hard cap on total chunks produced. Excess chunks are dropped with a warning.
-        Prevents a single huge repo from stalling the pipeline for hours (Section 6.2).
-
-    Returns
-    -------
-    list of dicts, each with:
-        {
-            'chunk_num': int,          # 1-based index
-            'total_chunks': int,       # filled in after all chunks are built
-            'category': str,           # primary category label for this chunk
-            'label': str,              # human-readable label, e.g. "core_logic [part 2/5]"
-            'content': str,            # concatenated file blocks, ready for the prompt
-        }
-    """
-    # ------------------------------------------------------------------ #
-    # 1. Iterate categories in priority order, build candidate chunks.    #
-    # ------------------------------------------------------------------ #
-    raw_chunks: list[dict] = []   # accumulate before applying chunk cap
+    raw_chunks: list[dict] = []
 
     for category in CATEGORY_ORDER:
         files = classified_files.get(category, [])
         if not files:
             continue
 
-        # Accumulate file blocks into groups that fit within max_chunk_chars.
         current_block = ""
         current_files: list[str] = []
 
-        for filepath in files:
-            content = _read_file_safe(filepath)
-            if not content.strip():
-                continue  # skip empty / unreadable files silently
-
-            # Large file: split into parts first, treat each part as its own file entry.
-            if len(content) > max_file_chars:
-                parts = _split_into_chunks(content, max_file_chars, str(filepath))
-                file_entries = [
-                    (f"{filepath} [part {i+1}/{len(parts)}]", chunk)
-                    for i, (_, chunk) in enumerate(parts)
-                ]
+        for file_item in files:
+            # BUG 1 FIX: walk_and_classify returns (label, content) tuples.
+            # Handle both tuple and Path/str inputs gracefully.
+            if isinstance(file_item, tuple) and len(file_item) == 2:
+                file_label, content = file_item
             else:
-                file_entries = [(str(filepath), content)]
+                file_label = str(file_item)
+                content = _read_file_safe(Path(file_item))
 
-            for file_label, file_content in file_entries:
-                block = FILE_SEPARATOR.format(filepath=file_label, content=file_content)
+            if not content.strip():
+                continue
+
+            if len(content) > max_file_chars:
+                file_entries = _split_into_chunks(content, max_file_chars, file_label)
+            else:
+                file_entries = [(file_label, content)]
+
+            for flabel, fcontent in file_entries:
+                block = FILE_SEPARATOR.format(filepath=flabel, content=fcontent)
 
                 if current_block and len(current_block) + len(block) > max_chunk_chars:
-                    # Current group is full — flush it.
                     raw_chunks.append({
                         'category': category,
                         'label': category,
                         'content': current_block,
                     })
                     current_block = block
-                    current_files = [file_label]
+                    current_files = [flabel]
                 else:
                     current_block += block
-                    current_files.append(file_label)
+                    current_files.append(flabel)
 
-        # Flush remaining content for this category.
         if current_block.strip():
             raw_chunks.append({
                 'category': category,
@@ -138,11 +102,6 @@ def chunk_files(
                 'content': current_block,
             })
 
-    # ------------------------------------------------------------------ #
-    # 2. If a category produced multiple sequential chunks, label them    #
-    #    "category [part X/N]" so the model knows where it is.           #
-    # ------------------------------------------------------------------ #
-    # Count how many chunks came from each category to build part labels.
     from collections import Counter
     category_counts = Counter(c['category'] for c in raw_chunks)
     category_seen: Counter = Counter()
@@ -156,22 +115,14 @@ def chunk_files(
         else:
             chunk['label'] = cat
 
-    # ------------------------------------------------------------------ #
-    # 3. Apply per-team chunk cap (Section 6.2 / config MAX_CHUNKS_PER_TEAM). #
-    # ------------------------------------------------------------------ #
     if len(raw_chunks) > max_chunks_per_team:
         logger.warning(
-            "Repo produced %d chunks — capping at %d. "
-            "Dropped categories: %s",
-            len(raw_chunks),
-            max_chunks_per_team,
+            "Repo produced %d chunks — capping at %d. Dropped: %s",
+            len(raw_chunks), max_chunks_per_team,
             [c['label'] for c in raw_chunks[max_chunks_per_team:]],
         )
         raw_chunks = raw_chunks[:max_chunks_per_team]
 
-    # ------------------------------------------------------------------ #
-    # 4. Assign final chunk_num / total_chunks fields.                    #
-    # ------------------------------------------------------------------ #
     total = len(raw_chunks)
     chunks: list[dict] = []
     for idx, chunk in enumerate(raw_chunks, start=1):
@@ -187,16 +138,12 @@ def chunk_files(
     return chunks
 
 
-# --------------------------------------------------------------------------- #
-# Convenience iterator — yields one chunk at a time for memory efficiency.    #
-# --------------------------------------------------------------------------- #
 def iter_chunks(
-    classified_files: dict[str, list[Path]],
+    classified_files: dict[str, list],
     max_chunk_chars: int = 60_000,
     max_file_chars: int = 80_000,
     max_chunks_per_team: int = 20,
 ) -> Iterator[dict]:
-    """Thin wrapper around chunk_files() that yields chunks one by one."""
     for chunk in chunk_files(
         classified_files,
         max_chunk_chars=max_chunk_chars,

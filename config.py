@@ -3,21 +3,31 @@
 # Central configuration. Every script imports from here.
 # =============================================================================
 # SETUP REQUIRED:
-#   1. Set GITHUB_TOKEN below (see README.md for how to create one)
+#   1. Export your GitHub token: export GITHUB_TOKEN=ghp_your_token_here
+#      (see README.md for how to create one — never hardcode it here)
 #   2. Confirm OLLAMA_BASE_URL is correct (default: localhost:11434)
 #   3. Confirm CODE_REVIEW_MODEL is pulled: `ollama pull qwen2.5-coder:14b`
 #   4. Confirm SYNTHESIS_MODEL is pulled:   `ollama pull mistral:7b`
 # =============================================================================
 
+import os
+
 # -----------------------------------------------------------------------------
 # GitHub
 # -----------------------------------------------------------------------------
 
-# Personal Access Token — create at: https://github.com/settings/tokens
-# Scopes needed: none (public repo search works with any token)
-# Without a token: 10 req/min → script works but is slow and fragile
+# Personal Access Token — set via environment variable, never hardcode here.
+# Create at: https://github.com/settings/tokens (no scopes needed)
+# Without a token: 10 req/min → slow and fragile
 # With a token:    30 req/min → completes in ~9 minutes for 265 teams
-GITHUB_TOKEN = "ghp_your_token_here"
+# Export before running: export GITHUB_TOKEN=ghp_your_token_here
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+if not GITHUB_TOKEN:
+    raise RuntimeError(
+        "GITHUB_TOKEN environment variable is not set.\n"
+        "Run: export GITHUB_TOKEN=ghp_your_token_here\n"
+        "Create a token at: https://github.com/settings/tokens"
+    )
 
 # Seconds to sleep between GitHub search requests.
 # Keep at 2.5 even with a token — GitHub has a secondary rate limiter.
@@ -78,7 +88,7 @@ MAX_CHUNK_CHARS = 60_000
 # Files larger than this get line-chunked (not skipped).
 MAX_FILE_CHARS = 80_000
 
-# Per-team chunk cap. Bounds worst-case time to ~7 min/team (20 chunks × ~20s/call).
+# Per-team chunk cap. Bounds worst-case time to ~7 min/team (20 chunks x ~20s/call).
 # Without this, a single large monorepo could stall the pipeline for 2+ hours.
 MAX_CHUNKS_PER_TEAM = 20
 
@@ -101,8 +111,8 @@ INCLUDE_EXTENSIONS = {
     # Code
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs", ".rb",
     ".php", ".cs", ".cpp", ".c", ".h", ".swift", ".kt", ".scala",
-    # Config / infra
-    ".json", ".yaml", ".yml", ".toml", ".env", ".xml", ".tf",
+    # Config / infra — .env intentionally excluded to avoid ingesting competitor secrets
+    ".json", ".yaml", ".yml", ".toml", ".xml", ".tf",
     # Docs (for README pre-read)
     ".md", ".txt", ".rst",
     # Gosu (Guidewire-specific)
@@ -160,10 +170,10 @@ REVIEWS_DIR         = "reviews"
 KNOWLEDGE_DIR       = "knowledge"
 LOGS_DIR            = "logs"
 
-# Knowledge output files (Phase 4)
-MASTER_PATTERNS_FILE = "knowledge/MASTER_PATTERNS.md"
-GAPS_FILE            = "knowledge/GAPS.md"
-FEATURE_PLAN_FILE    = "knowledge/YOUR_FEATURE_PLAN.md"
+# Knowledge output files (Phase 4) — derived from KNOWLEDGE_DIR to avoid drift
+MASTER_PATTERNS_FILE = os.path.join(KNOWLEDGE_DIR, "MASTER_PATTERNS.md")
+GAPS_FILE            = os.path.join(KNOWLEDGE_DIR, "GAPS.md")
+FEATURE_PLAN_FILE    = os.path.join(KNOWLEDGE_DIR, "YOUR_FEATURE_PLAN.md")
 
 # -----------------------------------------------------------------------------
 # Leaderboard Scraping (Phase 0 — optional)

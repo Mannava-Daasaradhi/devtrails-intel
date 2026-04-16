@@ -485,12 +485,12 @@ def main() -> None:
 
     ordered = (
         [t for t in manifest if t.get('confidence') == 'HIGH'] +
-        [t for t in manifest if t.get('confidence') == 'LOW'] +
-        [t for t in manifest if t.get('confidence') == 'NOT_FOUND']
+        [t for t in manifest if t.get('confidence') == 'LOW']
     )
 
+    not_found_count = sum(1 for t in manifest if t.get('confidence') == 'NOT_FOUND')
     total = len(ordered)
-    print(f"\nStarting Phase 3 — {total} teams to review")
+    print(f"\nStarting Phase 3 — {total} teams to review (skipping {not_found_count} NOT_FOUND teams)")
     print(f"Model: {CODE_REVIEW_MODEL}  |  Max chunks/team: {MAX_CHUNKS_PER_TEAM}")
     print(f"Estimated time: ~{total * 6 * 20 // 3600}–{total * 8 * 20 // 3600} hours\n")
 

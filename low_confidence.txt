@@ -1,0 +1,42 @@
+   3	LOW 	https://github.com/Manogna21-prog/Safe-Shift	Code Mavens
+   3	LOW 	https://github.com/dagaayush1205/Winkit	Astro Bugs
+   3	LOW 	https://github.com/Mohammed-Rafi-35/Carbon---Phase-II	Carbon
+   3	LOW 	https://github.com/Adwaithpv/Guidewire	SharkBYTE
+   3	LOW 	https://github.com/anudeepmuppalla1729/EarnGuard	Infinite Loops
+   3	LOW 	https://github.com/lakshug23/GigShield	Team Titan
+   3	LOW 	https://github.com/dorateja293/AI-driven-gig-worker-insurance-system	InsureX
+   3	LOW 	https://github.com/Shravanthi20/InDel	ImaginAI
+   3	LOW 	https://github.com/Hemachandhar-A/Giggle	ShadowKernel
+   3	LOW 	https://github.com/harish040120/Aegis	Zero Noise Crew
+   3	LOW 	https://github.com/TarunSitaraman/QuickCover	SPAM
+   3	LOW 	https://github.com/SumatiPaliwal89/InsurX	InsurX
+   3	LOW 	https://github.com/Jival-Raghav/GigShield	InsureEase
+   3	LOW 	https://github.com/KRUMER2023/Guidewire_Devtrials_Team_Megatron_Insurance_Startup_Simulation	Hustlers
+   3	LOW 	https://github.com/just-Panth/QuickShield_App	Chai_Pe_Charcha
+   0	LOW 	https://github.com/VG776/GigKavach	QuadCore
+   3	LOW 	https://github.com/Vipulgupta23/Guidewire_Xplosion	Xplosion
+   3	LOW 	https://github.com/haribhaski/guidewire-GigCognito	Hackuracy
+   3	LOW 	https://github.com/Dhruvv-16/Hustlr	Code Crafters
+   3	LOW 	https://github.com/KARTHI3106/GW_DT_Synapse	synapse
+   3	LOW 	https://github.com/Shreyash-Joshi01/UntitledThreats	Untitled Threats
+   3	LOW 	https://github.com/bled1908/HeavenlyDoom_AegisShield	HeavenlyDoom
+   3	LOW 	https://github.com/disha-bose-8/QCommerce-Parametric-Insurance	zephyr
+   3	LOW 	https://github.com/Srinidhi-111/streetguard	Code4ce
+   3	LOW 	https://github.com/Ghoulayush/GuideWire	TrailBlazers
+   3	LOW 	https://github.com/k0w4lzk1/delisure	Lord of the strings
+   3	LOW 	https://github.com/vighneshb04/monsoonshield	IKEA
+   3	LOW 	https://github.com/jms-luck/Trust_trace_AI	Cosmos
+   3	LOW 	https://github.com/ShubhamAjayTiwari/devtrials-old	TEDH
+   3	LOW 	https://github.com/kishan-1001/KavachPay	Ctrl Alt Elite
+   3	LOW 	https://github.com/Adinair01/Earn-Shield-AI	CODEpreneurs
+   3	LOW 	https://github.com/Aditya060806/GigCover	Vandalizers
+   3	LOW 	https://github.com/Vansh-Gupta21/KavachAI	CacheNova
+   3	LOW 	https://github.com/kamal-2006/The-Strawhats	The Strawhats
+   4	LOW 	https://github.com/Srijansarkar17/GuideWire-Hackathon	Void main()
+   0	LOW 	https://github.com/pratyushadk/UnderDogs	UnderDogs
+   3	LOW 	https://github.com/Arnav2706/Sambal	The Zenithers
+   3	LOW 	https://github.com/TEJAS-3008/guidewire	Mountain@Dew$
+   3	LOW 	https://github.com/isuryaprakashh/Guidewire-Hackathon	APRAMEYA
+   3	LOW 	https://github.com/abdul8704/GuideWire_Visioners	Visioners
+   3	LOW 	https://github.com/orange-19/FleetLock-Product	LeadToWin
+   3	LOW 	https://github.com/Mekala-Sanjith3/RiskShield-Gig	Prime AutoBots
